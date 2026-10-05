@@ -1,0 +1,122 @@
+# Local development stack: everything the app needs, one command.
+#   docker compose up --build        ->  http://localhost:5173
+# Not for production (see docs/DEPLOYMENT.md). Secrets here are dev-only defaults.
+
+x-backend-env: &backend-env
+  NODE_ENV: production
+  LOG_LEVEL: info
+  DATABASE_URL: postgres://stayease:stayease@postgres:5432/stayease
+  REDIS_URL: redis://redis:6379
+  JWT_SECRET: local-dev-only-secret-change-me-0123456789abcdef
+  CORS_ORIGIN: http://localhost:5173
+  TRUST_PROXY: 1
+  # Payments: put your Razorpay TEST keys in a .env file next to this compose
+  # file (RAZORPAY_KEY_ID=..., etc.). Without them everything works except "Pay".
+  RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID:-rzp_test_placeholder}
+  RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET:-placeholder}
+  RAZORPAY_WEBHOOK_SECRET: ${RAZORPAY_WEBHOOK_SECRET:-local-webhook-secret}
+  # MinIO = local S3. The API talks to it as "minio", your browser as "localhost".
+  S3_ENDPOINT: http://minio:9000
+  S3_PUBLIC_ENDPOINT: http://localhost:9000
+  S3_REGION: us-east-1
+  S3_BUCKET: stayease-exports
+  S3_ACCESS_KEY_ID: stayease
+  S3_SECRET_ACCESS_KEY: stayease-secret
+  S3_FORCE_PATH_STYLE: "true"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: stayease
+      POSTGRES_PASSWORD: stayease
+      POSTGRES_DB: stayease
+    ports: ["5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stayease"]
+      interval: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      retries: 20
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: stayease
+      MINIO_ROOT_PASSWORD: stayease-secret
+    ports: ["9000:9000", "9001:9001"]
+    volumes: [miniodata:/data]
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 3s
+      retries: 20
+
+  # One-shot: create the private exports bucket.
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio: { condition: service_healthy }
+    entrypoint: >
+      sh -c "mc alias set local http://minio:9000 stayease stayease-secret &&
+             mc mb --ignore-existing local/stayease-exports"
+
+  # One-shot: schema + demo data (admin, owner, tenant, 9 PGs).
+  migrate:
+    build: ./backend
+    environment: *backend-env
+    depends_on:
+      postgres: { condition: service_healthy }
+    command: >
+      sh -c "node src/models/migrate.js &&
+             node src/models/seedAdmin.js admin@stayease.in Admin12345 &&
+             node src/models/seedListings.js"
+
+  api:
+    build: ./backend
+    environment: *backend-env
+    init: true
+    ports: ["5000:5000"]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+      minio-init: { condition: service_completed_successfully }
+
+  worker:
+    build: ./backend
+    environment:
+      <<: *backend-env
+      SERVICE_NAME: stayease-worker
+    init: true
+    command: ["node", "src/jobs/billGeneration.job.js"]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+
+  # One-shot: registers the monthly billing schedule in Redis, then exits.
+  scheduler:
+    build: ./backend
+    environment:
+      <<: *backend-env
+      SERVICE_NAME: stayease-scheduler
+    command: ["node", "src/jobs/scheduler.js"]
+    depends_on:
+      redis: { condition: service_healthy }
+
+  web:
+    build: ./frontend
+    environment:
+      API_UPSTREAM: http://api:5000
+    ports: ["5173:80"]
+    depends_on: [api]
+
+volumes:
+  pgdata:
+  miniodata:
