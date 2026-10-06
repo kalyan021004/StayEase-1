@@ -2,7 +2,7 @@ const express = require("express");
 const router = express.Router();
 
 const billingController = require("../controllers/billing.controller");
-const { authenticate, requireRole } = require("../middlewares/auth.middleware");
+const { authenticate, requireRole ,allowCronOrAdmin} = require("../middlewares/auth.middleware");
 const {
   validate,
   validateQuery,
@@ -30,6 +30,7 @@ router.get(
 router.post(
   "/admin/generate",
   authenticate,
+  allowCronOrAdmin,
   requireRole("admin"),
   validate(generateBillsSchema),
   billingController.manualGenerate

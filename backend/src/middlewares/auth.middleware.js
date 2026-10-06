@@ -7,18 +7,50 @@ function readToken(req) {
   return header.slice(7).trim() || null;
 }
 
-// AUTHENTICATION: is there a valid token?
+// Video #8 - Authentication and authorization for backend engineers
+const { verifyToken } = require("../utils/jwt");
+const AppError = require("../utils/AppError");
+
 function authenticate(req, res, next) {
-  const token = readToken(req);
-  if (!token) return next(new AppError("Please log in to continue", 401));
+  const header = req.headers.authorization;
+  if (!header || !header.startsWith("Bearer ")) {
+    return next(new AppError("No token provided", 401));
+  }
+  const token = header.split(" ")[1];
   try {
-    const decoded = verifyToken(token); // { id, role, iat, exp }
-    req.user = { id: decoded.id, role: decoded.role };
+    const decoded = verifyToken(token);
+    req.user = decoded;
     next();
-  } catch {
-    next(new AppError("Your session has expired. Please log in again.", 401));
+  } catch (err) {
+    next(new AppError("Invalid or expired token", 401));
   }
 }
+
+function requireRole(...allowedRoles) {
+  return (req, res, next) => {
+    if (!req.user || !allowedRoles.includes(req.user.role)) {
+      return next(new AppError("You do not have access to this resource", 403));
+    }
+    next();
+  };
+}
+
+// ADD THIS - lets an external cron pinger trigger billing without a JWT,
+// using a shared secret instead. Falls back to normal admin auth otherwise.
+function allowCronOrAdmin(req, res, next) {
+  const cronSecret = req.headers["x-cron-secret"];
+  if (cronSecret && process.env.CRON_SECRET && cronSecret === process.env.CRON_SECRET) {
+    return next();
+  }
+  authenticate(req, res, (err) => {
+    if (err) return next(err);
+    requireRole("admin")(req, res, next);
+  });
+}
+
+
+// AUTHENTICATION: is there a valid token?
+
 
 // Same as authenticate, but anonymous requests are allowed through.
 // Used by public endpoints that show extra data to owners/admins.
@@ -35,13 +67,6 @@ function optionalAuth(req, res, next) {
 }
 
 // AUTHORIZATION: does this user have the right role?
-function requireRole(...allowedRoles) {
-  return (req, res, next) => {
-    if (!req.user || !allowedRoles.includes(req.user.role)) {
-      return next(new AppError("You do not have access to this resource", 403));
-    }
-    next();
-  };
-}
 
-module.exports = { authenticate, optionalAuth, requireRole };
+
+module.exports = { authenticate, optionalAuth, requireRole,allowCronOrAdmin };
