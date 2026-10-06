@@ -8,8 +8,6 @@ function readToken(req) {
 }
 
 // Video #8 - Authentication and authorization for backend engineers
-const { verifyToken } = require("../utils/jwt");
-const AppError = require("../utils/AppError");
 
 function authenticate(req, res, next) {
   const header = req.headers.authorization;
